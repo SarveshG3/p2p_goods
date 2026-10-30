@@ -6,6 +6,10 @@ import WorkflowStepper from "./components/WorkflowStepper";
 import InterruptPanel from "./components/InterruptPanel";
 import ResultsPanel from "./components/ResultsPanel";
 import JsonViewer from "./components/JsonViewer";
+import RagChat from "./components/RagChat";
+import PdfPreview from "./components/PdfPreview";
+import CollapsibleCard from "./components/CollapsibleCard";
+import WorkflowStatusCard from "./components/WorkflowStatusCard";
 
 import {
   orchestrateWorkflow,
@@ -22,52 +26,61 @@ export default function App() {
   const [workflowState, setWorkflowState] = useState(null);
   const [interrupt, setInterrupt] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [simulatedStep, setSimulatedStep] = useState(0);
+  const [currentNode, setCurrentNode] = useState(null);
+
+  // NEW: toggle chat page
+  const [showChat, setShowChat] = useState(false);
 
   function applyWorkflowResponse(data) {
     setThreadId(data.thread_id || "");
     setStatus(data.status || "");
     setWorkflowState(data.state || null);
-    setInterrupt(data.interrupt || null);
+    setInterrupt(data.interrupt ?? null);
   }
-  function runSimulatedProgress() {
-    setSimulatedStep(1);
 
-    const timers = [
-      setTimeout(() => setSimulatedStep(2), 1000),
-      setTimeout(() => setSimulatedStep(3), 9000),
-      setTimeout(() => setSimulatedStep(4), 18000),
-      setTimeout(() => setSimulatedStep(5), 27000),
-      setTimeout(() => setSimulatedStep(6), 36000),
-      setTimeout(() => setSimulatedStep(7), 45000),
-      setTimeout(() => setSimulatedStep(8), 54000),
-    ];
+  function handleStreamEvent(payload) {
+    if (payload.thread_id) {
+      setThreadId(payload.thread_id);
+    }
 
-    return timers;
+    if (payload.node) {
+      setCurrentNode(payload.node);
+    }
   }
+
   async function handleStart() {
     if (!mainFile) {
       alert("Please upload a master PDF first.");
       return;
     }
 
-    let timers = [];
-
     try {
       setLoading(true);
-      setSimulatedStep(0);
-      timers = runSimulatedProgress();
+      setCurrentNode("upload");
+      setInterrupt(null);
+      setWorkflowState(null);
+      setStatus("started");
 
-      const data = await orchestrateWorkflow(mainFile);
+      const finalEvent = await orchestrateWorkflow(mainFile, handleStreamEvent);
 
-      applyWorkflowResponse(data);
-      setSimulatedStep(9);
+      if (!finalEvent) {
+        throw new Error("Workflow stream ended without a final event");
+      }
+
+      if (finalEvent.event === "interrupted") {
+        setStatus("interrupted");
+        setInterrupt(finalEvent.interrupt || null);
+      } else if (finalEvent.event === "done") {
+        setStatus(finalEvent.status || "done");
+        setWorkflowState(finalEvent.state || null);
+        setInterrupt(null);
+        setStatus("success");
+      }
     } catch (err) {
       console.error(err);
       alert(err.message || "Failed to start workflow");
     } finally {
       setLoading(false);
-      timers.forEach(clearTimeout);
     }
   }
 
@@ -77,8 +90,22 @@ export default function App() {
 
     try {
       setLoading(true);
-      const data = await resumeDecision1(threadId, files);
-      applyWorkflowResponse(data);
+
+      const finalEvent = await resumeDecision1(threadId, files, handleStreamEvent);
+
+      if (!finalEvent) {
+        throw new Error("Resume stream ended without a final event");
+      }
+
+      if (finalEvent.event === "interrupted") {
+        setStatus("interrupted");
+        setInterrupt(finalEvent.interrupt || null);
+      } else if (finalEvent.event === "done") {
+        setStatus(finalEvent.status || "done");
+        setWorkflowState(finalEvent.state || null);
+        setInterrupt(null);
+        setStatus("success");
+      }
     } catch (err) {
       console.error(err);
       alert(err.message || "Failed to resume decision 1");
@@ -92,8 +119,27 @@ export default function App() {
 
     try {
       setLoading(true);
-      const data = await resumeDecision2(threadId, approved, reason || "");
-      applyWorkflowResponse(data);
+
+      const finalEvent = await resumeDecision2(
+        threadId,
+        approved,
+        reason || "",
+        handleStreamEvent
+      );
+
+      if (!finalEvent) {
+        throw new Error("Approval resume stream ended without a final event");
+      }
+
+      if (finalEvent.event === "interrupted") {
+        setStatus("interrupted");
+        setInterrupt(finalEvent.interrupt || null);
+      } else if (finalEvent.event === "done") {
+        setStatus(finalEvent.status || "done");
+        setWorkflowState(finalEvent.state || null);
+        setInterrupt(null);
+        setStatus("success");
+      }
     } catch (err) {
       console.error(err);
       alert(err.message || "Failed to resume decision 2");
@@ -102,9 +148,35 @@ export default function App() {
     }
   }
 
+  // CHAT VIEW
+  if (showChat) {
+    return (
+      <div className="app-shell">
+        <Header />
+        <RagChat threadId={threadId} onBack={() => setShowChat(false)} />
+      </div>
+    );
+  }
+
+  // MAIN DASHBOARD VIEW
   return (
     <div className="app-shell">
       <Header />
+
+      <div className="top-action-row">
+        <button
+          className="secondary-btn"
+          onClick={() => {
+            if (!threadId) {
+              alert("Run a workflow first so the chat has a thread to query.");
+              return;
+            }
+            setShowChat(true);
+          }}
+        >
+          Open Document Chat
+        </button>
+      </div>
 
       <div className="dashboard-grid">
         <div className="left-column">
@@ -120,14 +192,12 @@ export default function App() {
             status={status}
             interrupt={interrupt}
           />
-          
-          <WorkflowStepper
-            status={status}
-            state={workflowState}
-            interrupt={interrupt}
-            simulatedStep={simulatedStep}
-          />
 
+          <WorkflowStatusCard
+              currentNode={currentNode}
+              status={status}
+              interrupt={interrupt}
+          />
           <InterruptPanel
             interrupt={interrupt}
             loading={loading}
@@ -137,8 +207,24 @@ export default function App() {
         </div>
 
         <div className="right-column">
-          <ResultsPanel state={workflowState} />
-          <JsonViewer data={workflowState} />
+          <CollapsibleCard
+              title="PDF Preview"
+              defaultOpen={true}
+          >
+              <PdfPreview file={mainFile}/>
+          </CollapsibleCard>
+          <CollapsibleCard
+              title="Workflow Outputs"
+              defaultOpen={true}
+          >
+              <ResultsPanel state={workflowState}/>
+          </CollapsibleCard>
+          <CollapsibleCard
+              title="Raw State JSON"
+              defaultOpen={false}
+          >
+              <JsonViewer data={workflowState}/>
+          </CollapsibleCard>
         </div>
       </div>
     </div>
